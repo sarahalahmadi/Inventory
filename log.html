@@ -151,7 +151,28 @@
   textarea.import-box:focus{ outline:none; border-color:var(--teal); box-shadow:0 0 0 3px rgba(21,140,130,0.15); }
 
   footer.foot{ text-align:center; font-size:11.5px; color:var(--slate); padding:26px 0 6px; }
+
+  .upload-box{
+    border:2px dashed var(--line); border-radius:12px; padding:22px;
+    text-align:center; background:#FCFBF6; margin-bottom:18px;
+    transition: border-color .15s ease, background .15s ease;
+  }
+  .upload-box.dragover{ border-color:var(--teal); background:#EFF7F6; }
+  .upload-box .icon{ font-size:26px; }
+  .upload-box .hint{ font-size:12px; color:var(--slate); margin-top:6px; }
+  .btn-upload{
+    display:inline-block; margin-top:12px; padding:10px 18px; border-radius:9px;
+    background:var(--navy); color:#F3F1EA; font-weight:700; font-size:13px;
+    cursor:pointer; border:none; font-family:inherit;
+  }
+  .btn-upload:hover{ background:var(--navy-2); }
+  .upload-status{ font-size:12.5px; margin-top:12px; font-weight:600; }
+  .upload-status.ok{ color:var(--green); }
+  .upload-status.warn{ color:var(--red); }
+  .divider-or{ display:flex; align-items:center; gap:12px; color:var(--slate); font-size:11.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; margin:18px 0; }
+  .divider-or::before, .divider-or::after{ content:""; flex:1; height:1px; background:var(--line); }
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
 <body>
 
@@ -192,7 +213,19 @@
       <div class="title">Reference Data <span class="ar">القوائم المرجعية</span></div>
       <span style="font-size:11.5px; color:var(--slate);" id="data-summary"></span>
     </div>
-    <div class="note">Paste rows copied straight from Excel (tab-separated), one row per line, in the exact column order shown below each box. Saving replaces the current list for any box you fill in — leave a box empty to keep what's already loaded.</div>
+    <div class="note">Uploading your Excel file updates the employee list, item list, stock balances, and recipient entities from its "القوائم المرجعية" reference sheet. It does not touch your saved requests — those live only on this website and stay exactly as they are.</div>
+
+    <div class="upload-box" id="drop-zone">
+      <div class="icon">📄</div>
+      <div style="font-weight:700; color:var(--navy);">Upload your Excel file</div>
+      <div class="hint">.xlsx or .xls &middot; reads the reference/lookup sheet automatically</div>
+      <input type="file" id="file-input" accept=".xlsx,.xls" style="display:none;">
+      <button class="btn-upload" id="btn-choose-file">Choose File</button>
+      <div class="upload-status" id="upload-status"></div>
+    </div>
+
+    <div class="divider-or">or paste manually</div>
+
     <div class="field">
       <label>Employees — columns: Name, Employee ID, Department</label>
       <textarea class="import-box" id="imp-emp" placeholder="Mehmood Khan	10006474	Operations"></textarea>
@@ -311,6 +344,101 @@
   function renderDataSummary(){
     const el = document.getElementById('data-summary');
     el.textContent = `${refData.employees.length} employees · ${refData.items.length} items · ${refData.entities.length} entities`;
+  }
+
+  // ---------- Excel upload ----------
+  const fileInput = document.getElementById('file-input');
+  const dropZone = document.getElementById('drop-zone');
+  const statusEl = document.getElementById('upload-status');
+
+  document.getElementById('btn-choose-file').addEventListener('click', ()=> fileInput.click());
+  fileInput.addEventListener('change', e=>{ if(e.target.files[0]) handleFile(e.target.files[0]); });
+
+  ['dragover','dragenter'].forEach(evt=> dropZone.addEventListener(evt, e=>{ e.preventDefault(); dropZone.classList.add('dragover'); }));
+  ['dragleave','drop'].forEach(evt=> dropZone.addEventListener(evt, e=>{ e.preventDefault(); dropZone.classList.remove('dragover'); }));
+  dropZone.addEventListener('drop', e=>{
+    e.preventDefault();
+    if(e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+  });
+
+  function findCol(headerRow, exact, partial){
+    let idx = headerRow.indexOf(exact);
+    if(idx !== -1) return idx;
+    return headerRow.findIndex(c => typeof c === 'string' && c.includes(partial));
+  }
+
+  function handleFile(file){
+    statusEl.textContent = "Reading file…";
+    statusEl.className = "upload-status";
+    const reader = new FileReader();
+    reader.onload = async (e)=>{
+      try{
+        const wb = XLSX.read(new Uint8Array(e.target.result), {type:'array'});
+        // Prefer a sheet whose name looks like the reference/lookup list; otherwise use the last sheet.
+        let sheetName = wb.SheetNames.find(n => n.includes('مرجعية')) || wb.SheetNames[wb.SheetNames.length - 1];
+        const ws = wb.Sheets[sheetName];
+        const rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:null});
+
+        // Find the header row by looking for the "اسم الموظف" label in the first few rows.
+        let headerRowIdx = rows.findIndex(r => r.some(c => c === 'اسم الموظف'));
+        if(headerRowIdx === -1) headerRowIdx = 1; // fallback to the known layout
+
+        const headerRow = rows[headerRowIdx];
+        const colEmpName = findCol(headerRow, 'اسم الموظف', 'الموظف');
+        const colEmpId   = findCol(headerRow, 'الرقم الوظيفي', 'الوظيفي');
+        const colDept    = findCol(headerRow, 'القسم', 'القسم');
+        const colItemName= findCol(headerRow, 'اسم الصنف', 'الصنف');
+        const colItemCode= findCol(headerRow, 'كود الصنف', 'كود');
+        const colBalance = findCol(headerRow, 'الرصيد المتاح', 'الرصيد');
+        const colEntity  = findCol(headerRow, 'الجهات المستلمة (غير الأفراد)', 'الجهات المستلمة');
+
+        const dataRows = rows.slice(headerRowIdx + 1);
+
+        const employees = [];
+        const items = [];
+        const entitiesSet = new Set();
+
+        dataRows.forEach(r=>{
+          if(colEmpName !== -1 && r[colEmpName]){
+            employees.push({
+              name: String(r[colEmpName]).trim(),
+              id: colEmpId !== -1 && r[colEmpId] != null ? String(r[colEmpId]).trim() : '',
+              dept: colDept !== -1 && r[colDept] != null ? String(r[colDept]).trim() : ''
+            });
+          }
+          if(colItemName !== -1 && r[colItemName]){
+            items.push({
+              name: String(r[colItemName]).trim(),
+              code: colItemCode !== -1 && r[colItemCode] != null ? String(r[colItemCode]).trim() : '',
+              available: colBalance !== -1 ? (parseInt(r[colBalance], 10) || 0) : 0
+            });
+          }
+          if(colEntity !== -1 && r[colEntity]){
+            entitiesSet.add(String(r[colEntity]).trim());
+          }
+        });
+
+        if(employees.length === 0 && items.length === 0){
+          statusEl.textContent = "Couldn't find recognizable employee/item columns in that sheet — try the manual paste boxes below instead.";
+          statusEl.className = "upload-status warn";
+          return;
+        }
+
+        if(employees.length) refData.employees = employees;
+        if(items.length) refData.items = items;
+        if(entitiesSet.size) refData.entities = Array.from(entitiesSet);
+
+        await saveRefData();
+        renderDataSummary();
+        statusEl.textContent = `Loaded ${employees.length} employees, ${items.length} items, ${entitiesSet.size} entities from "${sheetName}".`;
+        statusEl.className = "upload-status ok";
+      }catch(err){
+        console.error(err);
+        statusEl.textContent = "Couldn't read that file — make sure it's a valid .xlsx or .xls workbook.";
+        statusEl.className = "upload-status warn";
+      }
+    };
+    reader.readAsArrayBuffer(file);
   }
 
   document.getElementById('btn-import').addEventListener('click', async ()=>{
